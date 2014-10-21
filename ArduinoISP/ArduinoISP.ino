@@ -6,11 +6,13 @@
 // This sketch turns the Arduino into a AVRISP
 // using the following arduino pins:
 //
-// pin name:    not-mega:         mega(1280 and 2560)
-// slave reset: 10:               53 
-// MOSI:        11:               51 
-// MISO:        12:               50 
-// SCK:         13:               52 
+// pin name:    Uno:  Leonardo:  ProMicro:  mega(1280 and 2560):
+// slave RST:   10    RXLED/any  RXLED/any  53 
+// MOSI:        11    ICSP 4     16         51 
+// MISO:        12    ICSP 1     14         50 
+// SCK:         13    ICSP 3     15         52 
+//
+// Tutorialk at http://arduino.cc/en/Tutorial/ArduinoISP
 //
 // Put an LED (with resistor) on the following pins:
 // 9: Heartbeat   - shows the programmer is running
@@ -42,10 +44,16 @@
 // - The AVRISP/STK500 (mk I) protocol is used in the arduino bootloader
 // - The SPI functions herein were developed for the AVR910_ARD programmer 
 // - More information at http://code.google.com/p/mega-isp
+//
+// October 2014 by Richard Bronosky
+// - Added details for Leonardo and SparkFun Pro Micro
+// - Added outputs for Pro Micro linear ICSP
+// - Pro Micro wiring to ATtiny45 example at http://i.imgur.com/l9Catve.jpg
 
-#include "SPI.h"
 #include "pins_arduino.h"
-#define RESET     SS
+#define RESET     10
+#define ISP_VCC   A0 // Power in lieu of ISP header
+#define ISP_GND   A1 // Ground in lieu of ISP header
 
 #define LED_HB    9
 #define LED_ERR   8
@@ -67,18 +75,17 @@
 void pulse(int pin, int times);
 
 void setup() {
-  Serial.begin(9600);
-  SPI.setDataMode(0);
-  SPI.setBitOrder(MSBFIRST);
-  // Clock Div can be 2,4,8,16,32,64, or 128
-  SPI.setClockDivider(SPI_CLOCK_DIV128);
+  Serial.begin(19200);
   pinMode(LED_PMODE, OUTPUT);
   pulse(LED_PMODE, 2);
   pinMode(LED_ERR, OUTPUT);
   pulse(LED_ERR, 2);
   pinMode(LED_HB, OUTPUT);
   pulse(LED_HB, 2);
-  
+  pinMode(ISP_VCC, OUTPUT);
+  digitalWrite(ISP_VCC, HIGH);
+  pinMode(ISP_GND, OUTPUT);
+  digitalWrite(ISP_GND, LOW);
 }
 
 int error=0;
@@ -97,11 +104,11 @@ typedef struct param {
   uint8_t selftimed;
   uint8_t lockbytes;
   uint8_t fusebytes;
-  uint8_t flashpoll;
-  uint16_t eeprompoll;
-  uint16_t pagesize;
-  uint16_t eepromsize;
-  uint32_t flashsize;
+  int flashpoll;
+  int eeprompoll;
+  int pagesize;
+  int eepromsize;
+  int flashsize;
 } 
 parameter;
 
@@ -115,7 +122,7 @@ void heartbeat() {
   if (hbval < 32) hbdelta = -hbdelta;
   hbval += hbdelta;
   analogWrite(LED_HB, hbval);
-  delay(40);
+  delay(20);
 }
 
 
@@ -160,13 +167,34 @@ void prog_lamp(int state) {
     digitalWrite(LED_PMODE, state);
 }
 
+void spi_init() {
+  uint8_t x;
+  SPCR = 0x53;
+  x=SPSR;
+  x=SPDR;
+}
+
+void spi_wait() {
+  do {
+  } 
+  while (!(SPSR & (1 << SPIF)));
+}
+
+uint8_t spi_send(uint8_t b) {
+  uint8_t reply;
+  SPDR=b;
+  spi_wait();
+  reply = SPDR;
+  return reply;
+}
+
 uint8_t spi_transaction(uint8_t a, uint8_t b, uint8_t c, uint8_t d) {
   uint8_t n;
-  SPI.transfer(a); 
-  n=SPI.transfer(b);
+  spi_send(a); 
+  n=spi_send(b);
   //if (n != a) error = -1;
-  n=SPI.transfer(c);
-  return SPI.transfer(d);
+  n=spi_send(c);
+  return spi_send(d);
 }
 
 void empty_reply() {
@@ -237,19 +265,25 @@ void set_parameters() {
 }
 
 void start_pmode() {
-  SPI.begin();
-  digitalWrite(RESET, HIGH);
+  spi_init();
+  // following delays may not work on all targets...
   pinMode(RESET, OUTPUT);
+  digitalWrite(RESET, HIGH);
+  pinMode(SCK, OUTPUT);
   digitalWrite(SCK, LOW);
-  delay(20);
+  delay(50);
   digitalWrite(RESET, LOW);
+  delay(50);
+  pinMode(MISO, INPUT);
+  pinMode(MOSI, OUTPUT);
   spi_transaction(0xAC, 0x53, 0x00, 0x00);
   pmode = 1;
 }
 
 void end_pmode() {
-  SPI.end();
-  digitalWrite(RESET, HIGH);
+  pinMode(MISO, INPUT);
+  pinMode(MOSI, INPUT);
+  pinMode(SCK, INPUT);
   pinMode(RESET, INPUT);
   pmode = 0;
 }
@@ -456,9 +490,6 @@ int avrisp() {
       Serial.print((char) STK_INSYNC);
       Serial.print("AVR ISP");
       Serial.print((char) STK_OK);
-    } else {
-      error++;
-      Serial.print((char) STK_NOSYNC);
     }
     break;
   case 'A':
@@ -475,11 +506,7 @@ int avrisp() {
     break;
 
   case 'P':
-    if (pmode) {
-      pulse(LED_ERR, 3);
-    } else {
-      start_pmode();
-    }
+    start_pmode();
     empty_reply();
     break;
   case 'U': // set address (word)
